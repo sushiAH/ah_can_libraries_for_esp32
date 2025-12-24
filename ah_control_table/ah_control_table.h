@@ -16,6 +16,7 @@ enum control_table_addr {
   VEL_P_ADDR = 9,
   VEL_I_ADDR = 10,
   VEL_D_ADDR = 11,
+  AIR_ADDR = 12,
 };
 
 #endif

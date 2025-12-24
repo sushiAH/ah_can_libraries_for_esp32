@@ -9,22 +9,31 @@
 
 #include <ah_esp32_can.h>
 
-// esp32デバイス固有のid
-const int esp32_id = 0x010;
+#include <ESP32-TWAI-CAN.hpp>
+
 
 /**
  * @brief freertos can taskを立ち上げる
  *
  * @param ctrl
  */
-void init_can(motor_controller* ctrl) {
+void init_can(int esp32_id,motor_controller* ctrl) {
   // Everything is defaulted so you can just call .begin() or .begin(TwaiSpeed)
   // Calling begin() to change speed works, it will disable current driver first
-  bool begin(TwaiSpeed twaiSpeed = TWAI_SPEED_500KBPS, int8_t txPin = -1,
-             int8_t rxPin = -1, uint16_t txQueue = 0xFFFF,
-             uint16_t rxQueue = 0xFFFF, twai_filter_config_t* fConfig = nullptr,
-             twai_general_config_t* gConfig = nullptr,
-             twai_timing_config_t* tConfig = nullptr););
+  
+
+  unsigned long acceptance_code = (esp32_id << 21);
+  unsigned long acceptance_mask = (0x003 << 21) | 0x1FFFFF;
+
+  // hardware can_identifier filtering
+  twai_filter_config_t f_config = {.acceptance_code = acceptance_code,
+                                   .acceptance_mask = acceptance_mask,
+                                   .single_filter = true};
+
+  ESP32Can.begin(TWAI_SPEED_1000KBPS, 5, 4, 10, 10, &f_config, nullptr,
+                 nullptr);
+
+  // ESP32Can.begin(ESP32Can.convertSpeed(1000), 5, 4, 10, 10);
 
   xTaskCreate(can_receive_task,  // タスク関数
               "can",             // タスク名
@@ -40,14 +49,14 @@ void init_can(motor_controller* ctrl) {
  * @param motor_id
  * @param send_data　送信するデータ
  */
-void send_frame(int motor_id, int32_t send_data_integer) {
+void send_frame(int tx_frame_id, int32_t send_data_integer) {
   uint8_t split_data[4] = {0};
 
   CanFrame txFrame;
 
-  split_int32(send_data_integer, split_data);
+  from_int32_to_bytes(send_data_integer, split_data);
 
-  txFrame.identifier = esp32_id + motor_id + 4;  // Default OBD2 address;
+  txFrame.identifier = tx_frame_id;  // Default OBD2 address;
   txFrame.extd = 0;
   txFrame.data_length_code = 4;
   txFrame.data[0] = split_data[0];
@@ -85,8 +94,9 @@ int read_target_from_frame(CanFrame* rxFrame, int32_t* target) {
     return 0;
 
   } else if (frame_length == 5) {
-    rxFrame->data[2] << 8 | rxFrame->data[1];
-    *target = rxFrame->data[4] << 24 | rxFrame->data[3] << 16 | return 0;
+    *target = rxFrame->data[4] << 24 | rxFrame->data[3] << 16 |
+              rxFrame->data[2] << 8 | rxFrame->data[1];
+    return 0;
   }
 
   return 1;
@@ -102,7 +112,7 @@ int read_target_from_frame(CanFrame* rxFrame, int32_t* target) {
 int write_to_control_table(motor_controller* ctrl, uint8_t table_addr,
                            int32_t data) {
   if (table_addr == OPERATING_MODE_ADDR) {
-    ctrl->operating_mode = int(data / 1000);
+    ctrl->operating_mode = data;
     return 0;
   }
 
@@ -149,8 +159,14 @@ int write_to_control_table(motor_controller* ctrl, uint8_t table_addr,
   else if (table_addr == GOAL_PWM_ADDR) {
     ctrl->goal_pwm = data;
     return 0;
+  }
 
-  } else {
+  else if (table_addr == AIR_ADDR) {
+    ctrl->air_val = data;
+    return 0;
+  }
+
+  else {
     return table_addr;
   }
 }
@@ -195,11 +211,14 @@ void can_receive_task(void* pvParameters) {
 
   CanFrame rxFrame;
 
+
   while (1) {
     // 受信
+    //wait one second
     if (ESP32Can.readFrame(&rxFrame, portMAX_DELAY)) {
+
       read_target_from_frame(&rxFrame, &target);
-      rx_motor_id = rxFrame.identifier - esp32_id;
+      rx_motor_id = rxFrame.identifier & 0x00F;
       table_addr = rxFrame.data[0];
 
       // 共有データ書き込み
@@ -215,8 +234,9 @@ void can_receive_task(void* pvParameters) {
       }
 
       // 送信
-      if (table_addr = CURRENT_SPEED_ADDR || table_addr = CRRENT_POS_ADDR) {
-        send_frame(rx_motor_id, current_data);
+      if (table_addr == CURRENT_SPEED_ADDR || table_addr == CURRENT_POS_ADDR) {
+        int tx_frame_id = rxFrame.identifier + 4;
+        send_frame(tx_frame_id, current_data);
       }
     }
   }
